@@ -6,15 +6,11 @@ import numpy as np
 # --- PAGE CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Smart DCA Dashboard", page_icon="📈")
 
-# --- CUSTOM CSS FOR STYLING ---
+# --- CUSTOM CSS FOR BADGES ONLY ---
+# We removed the metric background styling to fix the "Unreadable Text" issue.
 st.markdown("""
     <style>
-    .stMetric {
-        background-color: #0E1117;
-        padding: 10px;
-        border-radius: 5px;
-    }
-    .badge-standard { background-color: #262730; color: #fff; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+    .badge-standard { background-color: #555; color: #fff; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
     .badge-smart { background-color: #1C4E38; color: #2EE583; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
     .badge-deep { background-color: #143528; color: #00FFA3; padding: 4px 8px; border-radius: 4px; font-size: 12px; border: 1px solid #00FFA3; }
     .badge-trim { background-color: #4A1A1A; color: #FF4B4B; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
@@ -22,27 +18,20 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- CONFIGURATION & INPUTS ---
-# List of assets to track (Matches your screenshot)
 TICKERS = ['SPY', 'VT', 'TSLA', 'AAPL', 'MSFT', 'AMZN', 'NFLX', 'NVDA', 'PLTR', 'META', 'GOOGL']
 
 # --- DATA FETCHING FUNCTION ---
-@st.cache_data(ttl=3600)  # Cache data for 1 hour to prevent spamming APIs
+@st.cache_data(ttl=3600)
 def get_market_data(tickers):
     data = []
     
-    # Download batch data for speed
-    hist_data = yf.download(tickers, period="2y", group_by='ticker', auto_adjust=True)
-    
+    # We fetch tickers one by one to avoid yfinance MultiIndex errors
+    # This is slightly slower but much more stable for a dashboard
     for ticker in tickers:
         try:
-            # Handle slight difference in yfinance structure for single vs multiple tickers
-            if len(tickers) == 1:
-                df = hist_data
-            else:
-                df = hist_data[ticker]
-            
-            # clean missing data
-            df = df.dropna()
+            stock = yf.Ticker(ticker)
+            # Fetch 2 years of history
+            df = stock.history(period="2y")
             
             if df.empty:
                 continue
@@ -50,24 +39,27 @@ def get_market_data(tickers):
             current_price = df['Close'].iloc[-1]
             
             # Calculate 200 Day Moving Average
-            dma_200 = df['Close'].rolling(window=200).mean().iloc[-1]
+            if len(df) >= 200:
+                dma_200 = df['Close'].rolling(window=200).mean().iloc[-1]
+            else:
+                dma_200 = df['Close'].mean() # Fallback if new stock
             
-            # Calculate Drawdown from 52-week High
+            # Calculate Drawdown from 52-week High (approx 252 trading days)
             year_high = df['Close'].tail(252).max()
             drawdown = (current_price - year_high) / year_high
             
             # Determine Status & Multiplier based on Dashboard Rules
-            # Rules: 
-            # 1. > 200 DMA & > 20% over 200 DMA -> Trim/Hold (0.0x)
-            # 2. < 200 DMA & Drawdown > 20% -> Deep Value (2.0x)
-            # 3. < 200 DMA -> Smart Buy (1.5x)
-            # 4. > 200 DMA -> Standard (1.0x)
-            
             dma_diff_pct = (current_price - dma_200) / dma_200
             
             status = "Standard"
             multiplier = 1.0
             badge_class = "badge-standard"
+            
+            # Logic:
+            # 1. > 20% over 200 DMA -> Trim/Hold
+            # 2. < 200 DMA & Drawdown > 20% -> Deep Value
+            # 3. < 200 DMA -> Smart Buy
+            # 4. Otherwise -> Standard
             
             if current_price > dma_200 and dma_diff_pct > 0.20:
                 status = "Overextended"
@@ -94,7 +86,9 @@ def get_market_data(tickers):
             })
             
         except Exception as e:
-            st.error(f"Error fetching {ticker}: {e}")
+            # Silently skip errors to prevent app crashing
+            print(f"Error fetching {ticker}: {e}")
+            continue
             
     return pd.DataFrame(data)
 
@@ -110,17 +104,17 @@ def main():
             st.cache_data.clear()
             st.rerun()
 
-    # Top Metrics (Hardcoded Fear & Greed for demo, as it requires scraping)
-    # In a real app, you'd scrape CNN Fear & Greed or use an API
+    # Top Metrics
     col_m1, col_m2 = st.columns(2)
     with col_m1:
         st.markdown("**Fear & Greed:** <span style='color:orange'>49 Neutral</span>", unsafe_allow_html=True)
     with col_m2:
         st.markdown("**Shiller PE:** <span style='color:red'>39.85 Overvalued</span>", unsafe_allow_html=True)
     
-    st.markdown("---")
+    st.divider()
 
     # Control Panel
+    # Using container with border ensuring visibility in light/dark mode
     with st.container(border=True):
         c1, c2, c3, c4, c5 = st.columns(5)
         
@@ -128,10 +122,11 @@ def main():
             base_contribution = st.number_input("Base Monthly Contribution ($)", value=1000, step=100)
         
         # Calculate Logic
-        df = get_market_data(TICKERS)
+        with st.spinner("Fetching market data..."):
+            df = get_market_data(TICKERS)
         
         if df.empty:
-            st.warning("No data available. Please check ticker symbols.")
+            st.error("Could not fetch data. Please check your internet connection or try again later.")
             return
 
         # Base allocation per asset (Equal Weight Base)
@@ -155,48 +150,56 @@ def main():
             st.metric("Opportunities", opportunities)
 
     # Legend
-    st.caption("Legend: < 200DMA (1.5x) | Deep Value < 200DMA & >20% DD (2.0x) | Standard (1.0x) | Overextended > 20% over 200DMA (0.0x)")
+    st.info("Strategy Legend: < 200DMA (1.5x) | Deep Value < 200DMA & >20% DD (2.0x) | Standard (1.0x) | Overextended > 20% over 200DMA (0.0x)", icon="ℹ️")
 
     # --- TABS FOR FILTERING ---
     tab1, tab2, tab3, tab4 = st.tabs(["All Assets", "Opportunities", "Standard", "Hold/Trim"])
 
     def render_grid(dataframe):
-        # Create a grid layout (4 columns)
-        cols = st.columns(4)
-        for index, row in dataframe.iterrows():
-            with cols[index % 4]:
-                # Card Container
-                with st.container(border=True):
-                    # Header: Ticker + Badge
-                    h1, h2 = st.columns([1, 2])
-                    with h1:
-                        st.subheader(row['Ticker'])
-                    with h2:
-                        st.markdown(f"<div style='text-align:right'><span class='{row['Badge']}'>{row['Status']}</span></div>", unsafe_allow_html=True)
-                    
-                    # Price Data
-                    st.metric("Price", f"${row['Price']:.2f}", f"{(row['Price'] - row['200_DMA']):.2f} vs 200DMA")
-                    
-                    # Progress Bar logic (Visual flair for valuation)
-                    # Normalize simple deviation for a progress bar (0.5 is fair value)
-                    progress_val = 0.5 + (row['DMA_Diff'] / 0.4) # rough scaling
-                    progress_val = max(0.0, min(1.0, progress_val))
-                    st.progress(progress_val, text="Undervalued ⟵ ⟶ Overvalued")
+        if dataframe.empty:
+            st.write("No assets in this category.")
+            return
 
-                    # Drawdown & Multiplier
-                    d1, d2 = st.columns(2)
-                    with d1:
-                        st.text("Drawdown")
-                        st.markdown(f"<span style='color: #FF4B4B'>{row['Drawdown']:.1%}</span>", unsafe_allow_html=True)
-                    with d2:
-                        st.text("Rec. Mult.")
-                        st.write(f"**x{row['Multiplier']}**")
-                    
-                    # Investment Action Button
-                    if row['Multiplier'] > 0:
-                        st.button(f"Invest ${row['Invest_Amount']:.2f}", key=f"btn_{row['Ticker']}", use_container_width=True, type="primary")
-                    else:
-                        st.button("Trim / Hold", key=f"btn_{row['Ticker']}", use_container_width=True, disabled=True)
+        # Create a grid layout
+        # We calculate rows to ensure layout stays clean
+        cols_per_row = 4
+        rows = [dataframe.iloc[i:i + cols_per_row] for i in range(0, len(dataframe), cols_per_row)]
+
+        for row_data in rows:
+            cols = st.columns(cols_per_row)
+            for idx, (index, asset) in enumerate(row_data.iterrows()):
+                with cols[idx]:
+                    # Card Container
+                    with st.container(border=True):
+                        # Header: Ticker + Badge
+                        h1, h2 = st.columns([1, 2])
+                        with h1:
+                            st.subheader(asset['Ticker'])
+                        with h2:
+                            st.markdown(f"<div style='text-align:right'><span class='{asset['Badge']}'>{asset['Status']}</span></div>", unsafe_allow_html=True)
+                        
+                        # Price Data
+                        st.metric("Price", f"${asset['Price']:.2f}", f"{(asset['Price'] - asset['200_DMA']):.2f} vs 200DMA")
+                        
+                        # Progress Bar logic
+                        progress_val = 0.5 + (asset['DMA_Diff'] / 0.4) 
+                        progress_val = max(0.0, min(1.0, progress_val))
+                        st.progress(progress_val, text="Undervalued ⟵ ⟶ Overvalued")
+
+                        # Drawdown & Multiplier
+                        d1, d2 = st.columns(2)
+                        with d1:
+                            st.text("Drawdown")
+                            st.markdown(f"**{asset['Drawdown']:.1%}**")
+                        with d2:
+                            st.text("Multiplier")
+                            st.markdown(f"**x{asset['Multiplier']}**")
+                        
+                        # Investment Action
+                        if asset['Multiplier'] > 0:
+                            st.success(f"Invest ${asset['Invest_Amount']:.2f}")
+                        else:
+                            st.warning("Trim / Hold")
 
     with tab1:
         render_grid(df)
